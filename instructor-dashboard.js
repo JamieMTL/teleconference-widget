@@ -77,7 +77,9 @@
     click_count: 0
   };
   let binTemplates = {};
+  let autoExpireTemplateId = "";
   let hasBootstrappedBin = false;
+  let hasInitializedSettings = false;
   let hasEditorInitialized = false;
 
   // Alert timers
@@ -256,6 +258,17 @@
       .tc-badge-pre { background: #e3f2fd; color: #0277bd; }
       .tc-badge-live { background: var(--md-success-bg); color: var(--md-success); }
 
+      /* Auto-Expire Summary Banner inside Editor */
+      .tc-expire-hint {
+        background: var(--md-amber-bg);
+        border: 1px solid #ffe082;
+        border-radius: 8px;
+        padding: 8px 12px;
+        font-size: 12.5px;
+        color: #5d4037;
+        margin-bottom: 14px;
+      }
+
       /* Form Inputs */
       .tc-section-title {
         font-size: 14px;
@@ -364,6 +377,17 @@
         border-color: var(--md-outline);
       }
 
+      .tc-btn-auto-active {
+        background: var(--md-success);
+        color: #ffffff;
+        border: 1.5px solid var(--md-success);
+      }
+
+      .tc-btn-auto-active:hover:not(:disabled) {
+        background: #1b5e20;
+        border-color: #1b5e20;
+      }
+
       .tc-btn-danger {
         background: var(--md-error-bg);
         color: var(--md-error);
@@ -402,14 +426,20 @@
         border-radius: 8px;
         padding: 10px 12px;
         display: flex;
+        flex-wrap: wrap;
         justify-content: space-between;
         align-items: flex-start;
         gap: 10px;
       }
 
+      .tc-bin-item.auto-expire-selected {
+        border-color: var(--md-success);
+        box-shadow: 0 0 0 1px rgba(46, 125, 50, 0.2);
+      }
+
       .tc-bin-text {
         flex: 1;
-        min-width: 0;
+        min-width: 180px;
       }
 
       .tc-bin-primary {
@@ -418,6 +448,21 @@
         color: #212121;
         margin-bottom: 3px;
         word-break: break-word;
+      }
+
+      .tc-auto-badge {
+        display: inline-block;
+        margin-left: 6px;
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-size: 10.5px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+        background: var(--md-success-bg);
+        color: var(--md-success);
+        border: 1px solid #a5d6a7;
+        vertical-align: middle;
       }
 
       .tc-bin-secondary {
@@ -429,6 +474,7 @@
 
       .tc-bin-actions {
         display: flex;
+        flex-wrap: wrap;
         gap: 6px;
         flex-shrink: 0;
       }
@@ -608,7 +654,7 @@
             <textarea id="tc-secondary-input" class="tc-textarea" maxlength="2000" placeholder="e.g. Drop in via Microsoft Teams! Click Join Meeting below..."></textarea>
           </div>
 
-          <div class="tc-row" style="margin-bottom:16px;">
+          <div class="tc-row" style="margin-bottom:14px;">
             <div class="tc-grow">
               <label for="tc-url-input" style="display:block; font-size:12.5px; font-weight:700; color:#424242; margin-bottom:5px;">
                 Active Meeting URL (Leave blank for Text-Only / Offline)
@@ -627,6 +673,10 @@
                 <option value="240">4 Hours</option>
               </select>
             </div>
+          </div>
+
+          <div class="tc-expire-hint" id="tc-expire-hint-text">
+            <strong>On Timer Expiration:</strong> Loading auto-expire preset...
           </div>
 
           <div class="tc-row">
@@ -847,10 +897,36 @@
     }
   }
 
+  async function toggleAutoExpireTemplate(templateId) {
+    if (!db || !dbMod) return;
+    const isCurrentlySelected = autoExpireTemplateId === templateId;
+    const nextId = isCurrentlySelected ? "" : templateId;
+
+    try {
+      await dbMod.set(dbMod.ref(db, "teleconference/settings"), {
+        auto_expire_template_id: nextId.slice(0, 100)
+      });
+      if (nextId) {
+        const tpl = binTemplates[nextId];
+        const label = tpl && tpl.primary_message ? tpl.primary_message : "Selected preset";
+        showToast('Auto-expire message set to "' + label + '".');
+      } else {
+        showToast("Auto-expire preset cleared (will use default offline notice).");
+      }
+    } catch (e) {
+      showToast("Error updating auto-expire setting: " + e.message);
+    }
+  }
+
   async function deleteBinTemplate(templateId) {
     if (!db || !dbMod) return;
     try {
       await dbMod.remove(dbMod.ref(db, "teleconference/bin/" + templateId));
+      if (autoExpireTemplateId === templateId) {
+        await dbMod.set(dbMod.ref(db, "teleconference/settings"), {
+          auto_expire_template_id: ""
+        });
+      }
       showToast("Preset removed.");
     } catch (e) {
       showToast("Error removing preset: " + e.message);
@@ -900,6 +976,30 @@
     }
   }
 
+  function renderExpireHintUI() {
+    const hintEl = document.getElementById("tc-expire-hint-text");
+    if (!hintEl) return;
+
+    const tpl =
+      autoExpireTemplateId && binTemplates[autoExpireTemplateId]
+        ? binTemplates[autoExpireTemplateId]
+        : null;
+
+    hintEl.innerHTML = "";
+    const strong = document.createElement("strong");
+    strong.textContent = "On Timer Expiration: ";
+    hintEl.appendChild(strong);
+
+    const desc = document.createTextNode(
+      tpl
+        ? 'Automatically switches Headline & Details to "' +
+            (tpl.primary_message || "Untitled Preset") +
+            '"'
+        : 'Automatically switches to default "Office Hours Currently Offline" notice'
+    );
+    hintEl.appendChild(desc);
+  }
+
   function renderAlertUI() {
     const box = document.getElementById("tc-alert-box");
     const textEl = document.getElementById("tc-alert-text");
@@ -929,6 +1029,8 @@
     const listEl = document.getElementById("tc-bin-list");
     if (!listEl) return;
 
+    renderExpireHintUI();
+
     const keys = Object.keys(binTemplates || {});
     if (keys.length === 0) {
       listEl.innerHTML =
@@ -943,8 +1045,10 @@
     listEl.innerHTML = "";
     keys.forEach(function (id) {
       const tpl = binTemplates[id] || {};
+      const isAutoExpire = Boolean(autoExpireTemplateId && autoExpireTemplateId === id);
+
       const item = document.createElement("div");
-      item.className = "tc-bin-item";
+      item.className = "tc-bin-item" + (isAutoExpire ? " auto-expire-selected" : "");
 
       const textDiv = document.createElement("div");
       textDiv.className = "tc-bin-text";
@@ -952,6 +1056,13 @@
       const pDiv = document.createElement("div");
       pDiv.className = "tc-bin-primary";
       pDiv.textContent = tpl.primary_message || "(No headline)";
+
+      if (isAutoExpire) {
+        const badge = document.createElement("span");
+        badge.className = "tc-auto-badge";
+        badge.textContent = "Auto-Expire Msg";
+        pDiv.appendChild(badge);
+      }
 
       const sDiv = document.createElement("div");
       sDiv.className = "tc-bin-secondary";
@@ -973,6 +1084,17 @@
         showToast("Preset loaded into editor. Choose a Publish option when ready.");
       });
 
+      const autoBtn = document.createElement("button");
+      autoBtn.type = "button";
+      autoBtn.className = isAutoExpire
+        ? "tc-btn tc-btn-auto-active tc-btn-sm"
+        : "tc-btn tc-btn-outline tc-btn-sm";
+      autoBtn.title = "Designate this preset to display automatically when the timer expires";
+      autoBtn.textContent = isAutoExpire ? "Auto-Expire: ON" : "Auto-Expire";
+      autoBtn.addEventListener("click", function () {
+        toggleAutoExpireTemplate(id);
+      });
+
       const delBtn = document.createElement("button");
       delBtn.type = "button";
       delBtn.className = "tc-btn tc-btn-danger tc-btn-sm";
@@ -982,6 +1104,7 @@
       });
 
       actionsDiv.appendChild(loadBtn);
+      actionsDiv.appendChild(autoBtn);
       actionsDiv.appendChild(delBtn);
 
       item.appendChild(textDiv);
@@ -1085,7 +1208,27 @@
         renderBinUI();
       });
 
-      // 5. 1-Second Heartbeat: Handles Live TTL Expiration & 10-Minute Alert Auto-Reset
+      // 5. Settings Listener (Designated Auto-Expire Template ID)
+      dbMod.onValue(dbMod.ref(db, "teleconference/settings"), function (snap) {
+        const val = snap.val();
+        if (val === null && !hasInitializedSettings) {
+          hasInitializedSettings = true;
+          dbMod
+            .set(dbMod.ref(db, "teleconference/settings"), {
+              auto_expire_template_id: "tpl_offline_notice"
+            })
+            .catch(function () {});
+          return;
+        }
+        hasInitializedSettings = true;
+        autoExpireTemplateId =
+          val && typeof val.auto_expire_template_id === "string"
+            ? val.auto_expire_template_id
+            : "";
+        renderBinUI();
+      });
+
+      // 6. 1-Second Heartbeat: Handles Live TTL Expiration & 10-Minute Alert Auto-Reset
       setInterval(function () {
         const now = Date.now();
 
@@ -1095,11 +1238,41 @@
           typeof liveState.expires_at === "number" &&
           now >= liveState.expires_at
         ) {
+          const fallbackTpl =
+            autoExpireTemplateId && binTemplates[autoExpireTemplateId]
+              ? binTemplates[autoExpireTemplateId]
+              : null;
+
+          const nextPrimary = fallbackTpl
+            ? (fallbackTpl.primary_message || "Office Hours Currently Offline").slice(0, 500)
+            : "Office Hours Currently Offline";
+          const nextSecondary = fallbackTpl
+            ? (fallbackTpl.secondary_message || "").slice(0, 2000)
+            : "";
+
+          // Optimistically update local state so duplicate writes do not fire on the next tick
+          liveState.button_url = "";
+          liveState.expires_at = null;
+          liveState.primary_message = nextPrimary;
+          liveState.secondary_message = nextSecondary;
+
+          const primaryEl = document.getElementById("tc-primary-input");
+          const secondaryEl = document.getElementById("tc-secondary-input");
+          const urlEl = document.getElementById("tc-url-input");
+          if (primaryEl) primaryEl.value = nextPrimary;
+          if (secondaryEl) secondaryEl.value = nextSecondary;
+          if (urlEl) urlEl.value = "";
+
           // Instructor dashboard exclusively mutates database on expiration
           dbMod
             .update(dbMod.ref(db, "teleconference/live_content"), {
+              primary_message: nextPrimary,
+              secondary_message: nextSecondary,
               button_url: "",
               expires_at: null
+            })
+            .then(function () {
+              showToast('Timer expired — switched to "' + nextPrimary + '".');
             })
             .catch(function () {});
         }
